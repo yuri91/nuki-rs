@@ -1,5 +1,6 @@
 use crate::command;
 use crate::message;
+use crate::crypto;
 use btleplug::api::{
     Central, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
@@ -8,9 +9,8 @@ use btleplug::api::Characteristic;
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use uuid::Uuid;
-use std::time::Duration;
 use std::cell::RefCell;
-use tokio::time;
+use byteorder::{LittleEndian, WriteBytesExt};
 
 use anyhow::Result;
 
@@ -65,17 +65,59 @@ impl Nuki {
         })
     }
     pub async fn pair(&mut self) -> Result<()> {
+        let (pubkey, privkey) = crypto::gen_keypair(); 
+
         let req = message::RequestData::new(command::PUBLIC_KEY);
-        let reply = self.send(&self.keyturner_pairing, &req).await?;
-        println!("pkey: {:x?}", reply);
+        let reply: message::PublicKey = self.send(&self.keyturner_pairing, &req).await?;
+
+        let nuki_pubkey = reply.key;
+        let shared_key = crypto::get_shared_key(&privkey, &nuki_pubkey);
+
+        let req = message::PublicKey::new(pubkey);
+        let resp: message::Challenge = self.send(&self.keyturner_pairing, &req).await?;
+
+        let nonce_nuki = resp.nonce;
+        let authenticator = crypto::h1([&pubkey[..], &nuki_pubkey[..], &nonce_nuki[..]], &shared_key);
+
+        let req = message::AuthorizationAuthenticator::new(&authenticator);
+        let resp: message::Challenge = self.send(&self.keyturner_pairing, &req).await?;
+
+        let id_type = 0u8;
+        let app_id = 0xc0febabeu32;
+        let mut app_id_bytes = Vec::new();
+        app_id_bytes.write_u32::<LittleEndian>(app_id).unwrap();
+        let name = b"rustynuke";
+        let mut name_bytes = [0u8; 32];
+        name_bytes[0..name.len()].copy_from_slice(name);
+        let nonce = crypto::gen_key();
+        let nonce_nuki2 = resp.nonce;
+        let authenticator = crypto::h1([&[id_type], &app_id_bytes[..], &name_bytes[..], &nonce[..], &nonce_nuki2[..]], &shared_key);
+
+        let req = message::AuthorizationData::new(&authenticator, id_type, app_id, &name_bytes, &nonce);
+        let resp: message::AuthorizationId = self.send(&self.keyturner_pairing, &req).await?;
+
+        // TODO: check authenticator consistency
+        let auth_id = resp.auth_id;
+
+        let nonce_nuki3 = resp.nonce;
+        let mut auth_id_bytes = Vec::new();
+        auth_id_bytes.write_u32::<LittleEndian>(auth_id).unwrap();
+        let authenticator = crypto::h1([&auth_id_bytes[..], &nonce_nuki3[..]], &shared_key);
+
+        let req = message::AuthorizationIdComfirmation::new(&authenticator, auth_id);
+        let resp: message::Status = self.send(&self.keyturner_pairing, &req).await?;
+
+        println!("status: {:?}", resp.status);
         Ok(())
     }
 
-    async fn send<R: message::Request>(&self, char: &Characteristic, r: &R) -> Result<message::Reply> {
+    async fn send<REP: message::Message, REQ: message::Message>(&self, char: &Characteristic, r: &REQ) -> Result<REP> {
+        println!("sending: {:?}", r);
         let buf = message::encode(r);
         self.p.write(char, &buf, WriteType::WithResponse).await?;
         let data = self.wait_for_notification(char).await?;
         let reply = message::decode(&data)?;
+        println!("received: {:?}", reply);
         Ok(reply)
     }
     async fn wait_for_notification(
