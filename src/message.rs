@@ -19,17 +19,6 @@ pub trait Message: std::fmt::Debug {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Auth<M: Message> {
-    auth_id: u32,
-    inner: M,
-}
-impl<M: Message> Auth<M> {
-    fn wrap(m: M, auth_id: u32) -> Auth<M> {
-        Auth { auth_id, inner: m }
-    }
-}
-
-#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ErrorReport {
     pub error_code: i8,
     pub command: command::CommandId,
@@ -308,15 +297,15 @@ pub fn encode<M: Message>(m: &M) -> Vec<u8> {
     buf
 }
 
-pub fn encrypt<M: Message>(auth_msg: &Auth<M>, key: &crypto::Key) -> Vec<u8> {
+pub fn encrypt<M: Message>(msg: &M, auth_id: u32, key: &crypto::Key) -> Vec<u8> {
     let mut plain = Vec::new();
-    plain.write_u32::<LittleEndian>(auth_msg.auth_id).unwrap();
-    encode_inner(&auth_msg.inner, &mut plain);
+    plain.write_u32::<LittleEndian>(auth_id).unwrap();
+    encode_inner(msg, &mut plain);
     crc::wrap(&mut plain);
     let nonce = crypto::gen_nonce();
     let mut payload = Vec::new();
     payload.write(&nonce).unwrap();
-    payload.write_u32::<LittleEndian>(auth_msg.auth_id).unwrap();
+    payload.write_u32::<LittleEndian>(auth_id).unwrap();
     payload
         .write_u16::<LittleEndian>(plain.len() as u16)
         .unwrap();
@@ -324,7 +313,7 @@ pub fn encrypt<M: Message>(auth_msg: &Auth<M>, key: &crypto::Key) -> Vec<u8> {
     payload
 }
 
-pub fn decrypt<M: Message>(payload: &[u8], key: &crypto::Key) -> Result<Auth<M>> {
+pub fn decrypt<M: Message>(payload: &[u8], key: &crypto::Key) -> Result<M> {
     let mut cur = Cursor::new(payload);
     let mut nonce: crypto::Nonce = [0; 24];
     cur.read_exact(&mut nonce)?;
@@ -349,7 +338,7 @@ pub fn decrypt<M: Message>(payload: &[u8], key: &crypto::Key) -> Result<Auth<M>>
         ));
     }
     let m = decode_inner(remaining_slice(&cur))?;
-    Ok(Auth { auth_id, inner: m })
+    Ok(m)
 }
 
 fn remaining_slice<'a>(cur: &Cursor<&'a [u8]>) -> &'a [u8] {
