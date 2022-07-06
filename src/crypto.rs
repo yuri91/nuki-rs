@@ -45,15 +45,19 @@ pub fn get_shared_key(local_priv: &SecretKey, remote_pub: &PublicKey) -> Key {
 }
 
 pub fn encrypt(buf: &mut Vec<u8>, message: &[u8], nonce: &Nonce, key: &Key) -> anyhow::Result<()> {
+    log::debug!("encrypting: {:x?}", message);
     let start = buf.len();
     buf.resize(start + message.len() + CRYPTO_SECRETBOX_MACBYTES, 0);
-    let cyphertext = &mut buf[start..];
-    crypto_secretbox_easy(cyphertext, message, nonce, key)?;
+    let ciphertext = &mut buf[start..];
+    crypto_secretbox_easy(ciphertext, message, nonce, key)?;
+    log::debug!("encrypted: {:?}", ciphertext);
     Ok(())
 }
 
 pub fn decrypt(ciphertext: &[u8], nonce: &Nonce, key: &Key) -> anyhow::Result<Vec<u8>> {
+    log::debug!("decrypting: {:x?}", ciphertext);
     let mut msg = vec![0; ciphertext.len() - CRYPTO_SECRETBOX_MACBYTES];
     crypto_secretbox_open_easy(&mut msg, ciphertext, nonce, key)?;
+    log::debug!("decrypted: {:x?}", msg);
     Ok(msg)
 }

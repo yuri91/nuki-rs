@@ -4,6 +4,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
+use dryoc::constants::CRYPTO_SECRETBOX_MACBYTES;
+use num_enum::TryFromPrimitive;
+use std::convert::TryInto;
 
 use crate::command;
 use crate::crc;
@@ -239,6 +242,116 @@ impl Message for Status {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
+pub struct KeyturnerStates {
+    pub nuki_state: NukiState,
+    pub lock_state: LockState,
+    pub trigger: Trigger,
+    pub current_time: [u8; 7],
+    pub timezone_offset: i16,
+    pub battery_critical: bool,
+    pub battery_charging: bool,
+    pub battery_percentage: u8,
+    pub config_update_count: u8,
+    pub lock_n_go_timer: u8,
+    pub last_lock_action: u8,
+    pub last_lock_action_trigger: Trigger,
+    pub last_lock_action_completion_status: u8,
+    pub door_sensor_state: DoorSensorState,
+
+}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NukiState {
+    Uninitialized = 0x00,
+    PairingMode = 0x01,
+    DoorMode = 0x02,
+    MaintenanceMode = 0x04,
+}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, TryFromPrimitive)]
+#[repr(u8)]
+pub enum LockState {
+    Uncalibrated = 0x00,
+    Locked = 0x01,
+    Unlocking = 0x02,
+    Unlocked = 0x03,
+    Locking = 0x04,
+    Unlatched = 0x05,
+    UnlockedLockNGo = 0x06,
+    Unlatching = 0x07,
+    Calibration = 0xfc,
+    BootRun = 0xfd,
+    MotorBlocked = 0xfe,
+    Undefined = 0xff,
+}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, TryFromPrimitive)]
+#[repr(u8)]
+pub enum Trigger {
+    System = 0x00,
+    Manual = 0x01,
+    Button = 0x02,
+    Automatic = 0x03,
+    AutoLock = 0x06,
+}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, TryFromPrimitive)]
+#[repr(u8)]
+pub enum DoorSensorState {
+    Unavailable = 0x00,
+    Deactivated = 0x01,
+    DoorClosed = 0x02,
+    DoorOpened = 0x03,
+    DoorStateUnknown = 0x04,
+    Calibrating = 0x05,
+}
+
+impl Message for KeyturnerStates {
+    const CMD: command::CommandId = command::KEYTURNER_STATES;
+
+    fn encode(&self, _buf: &mut Vec<u8>) {
+        unreachable!();
+    }
+    fn decode(cur: &mut Cursor<&[u8]>) -> Result<Self> {
+        let nuki_state = cur.read_u8()?.try_into()?;
+        let lock_state = cur.read_u8()?.try_into()?;
+        let trigger = cur.read_u8()?.try_into()?;
+        let mut current_time = [0; 7];
+        cur.read_exact(&mut current_time)?;
+        let timezone_offset = cur.read_i16::<LittleEndian>()?;
+        let critical_battery_state = cur.read_u8()?;
+        let battery_critical = (critical_battery_state & 0x01) == 0x01;
+        let battery_charging = (critical_battery_state & 0x02) == 0x02;
+        let battery_percentage = (critical_battery_state & 0xfc) >> 1;
+        let config_update_count = cur.read_u8()?;
+        let lock_n_go_timer = cur.read_u8()?;
+        let last_lock_action = cur.read_u8()?;
+        let last_lock_action_trigger = cur.read_u8()?.try_into()?;
+        let last_lock_action_completion_status = cur.read_u8()?;
+        let door_sensor_state = cur.read_u8()?.try_into()?;
+        cur.read_u16::<LittleEndian>()?; // night mode flag. NOTE: Seems incorrect!
+        cur.read_u8()?; // Accessory battery state;
+        // Next 3 bytes are not documented
+        cur.read_u8()?;
+        cur.read_u8()?;
+        cur.read_u8()?;
+        Ok(KeyturnerStates {
+            nuki_state,
+            lock_state,
+            trigger,
+            current_time,
+            timezone_offset,
+            battery_critical,
+            battery_charging,
+            battery_percentage,
+            config_update_count,
+            lock_n_go_timer,
+            last_lock_action,
+            last_lock_action_trigger,
+            last_lock_action_completion_status,
+            door_sensor_state,
+        })
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct RequestData {
     pub command: command::CommandId,
 }
@@ -259,6 +372,7 @@ impl Message for RequestData {
 }
 
 fn decode_inner<M: Message>(data: &[u8]) -> Result<M> {
+    log::debug!("decode_inner: {:x?}", data);
     let mut cur = Cursor::new(data);
     let cmd = cur.read_u16::<LittleEndian>()?;
     let cmd = command::parse(cmd)?;
@@ -275,7 +389,7 @@ fn decode_inner<M: Message>(data: &[u8]) -> Result<M> {
         return Err(anyhow::anyhow!("Unexpected command: {}", cmd));
     };
     if cur.position() as usize != data.len() {
-        return Err(anyhow::anyhow!("Unexpected extra bytes"));
+        return Err(anyhow::anyhow!("Unexpected extra bytes: {:x?}", remaining_slice(&cur)));
     }
     Ok(msg)
 }
@@ -307,26 +421,28 @@ pub fn encrypt<M: Message>(msg: &M, auth_id: u32, key: &crypto::Key) -> Vec<u8> 
     payload.write(&nonce).unwrap();
     payload.write_u32::<LittleEndian>(auth_id).unwrap();
     payload
-        .write_u16::<LittleEndian>(plain.len() as u16)
+        .write_u16::<LittleEndian>((plain.len() + CRYPTO_SECRETBOX_MACBYTES) as u16)
         .unwrap();
     crypto::encrypt(&mut payload, &plain, &nonce, &key).unwrap();
     payload
 }
 
 pub fn decrypt<M: Message>(payload: &[u8], key: &crypto::Key) -> Result<M> {
+    log::debug!("decrypting: {:x?}", payload);
     let mut cur = Cursor::new(payload);
     let mut nonce: crypto::Nonce = [0; 24];
     cur.read_exact(&mut nonce)?;
     let auth_id = cur.read_u32::<LittleEndian>()?;
     let len = cur.read_u16::<LittleEndian>()? as usize;
-    let plain = crypto::decrypt(remaining_slice(&cur), &nonce, key)?;
-    if len != plain.len() {
+    let encrypted = remaining_slice(&cur);
+    if len != encrypted.len() {
         return Err(anyhow::anyhow!(
             "Inconsistent length! outer: {}, inner: {}",
             len,
-            plain.len()
+            encrypted.len()
         ));
     }
+    let plain = crypto::decrypt(encrypted, &nonce, key)?;
     let data = crc::unwrap(&plain)?;
     let mut cur = Cursor::new(data);
     let auth_id_inner = cur.read_u32::<LittleEndian>()?;
