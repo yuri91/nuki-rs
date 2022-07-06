@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 use dryoc::constants::CRYPTO_SECRETBOX_MACBYTES;
-use num_enum::TryFromPrimitive;
+use num_enum::{TryFromPrimitive, IntoPrimitive};
 use std::convert::TryInto;
 
 use crate::command;
@@ -348,6 +348,61 @@ impl Message for KeyturnerStates {
             last_lock_action_completion_status,
             door_sensor_state,
         })
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct LockAction {
+    pub lock_action: LockActionKind,
+    pub app_id: u32,
+    pub flags: u8,
+    pub name_suffix: Option<[u8; 20]>,
+    pub nonce: [u8; 32],
+}
+#[derive(PartialEq, Eq, Clone, Copy, Debug, IntoPrimitive)]
+#[repr(u8)]
+pub enum LockActionKind {
+    Unlock = 0x01,
+    Lock = 0x02,
+    Unlatch = 0x03,
+    LockNGo = 0x04,
+    LockNGoWithUnlatch = 0x05,
+    FullLock = 0x06,
+    FobAction1 = 0x81,
+    FobAction2 = 0x82,
+    FobAction3 = 0x83,
+}
+impl LockAction {
+    pub fn new(
+        lock_action: LockActionKind,
+        app_id: u32,
+        flags: u8,
+        name_suffix: Option<&[u8; 20]>,
+        nonce: &[u8; 32],
+    ) -> LockAction {
+        LockAction {
+            lock_action,
+            app_id,
+            flags,
+            name_suffix: name_suffix.cloned(),
+            nonce: *nonce,
+        }
+    }
+}
+impl Message for LockAction {
+    const CMD: command::CommandId = command::LOCK_ACTION;
+
+    fn encode(&self, buf: &mut Vec<u8>) {
+        buf.write_u8(self.lock_action.into()).unwrap();
+        buf.write_u32::<LittleEndian>(self.app_id).unwrap();
+        buf.write_u8(self.flags).unwrap();
+        if let Some(name_suffix) = &self.name_suffix {
+            buf.write_all(name_suffix).unwrap();
+        }
+        buf.write_all(&self.nonce).unwrap();
+    }
+    fn decode(_cur: &mut Cursor<&[u8]>) -> Result<Self> {
+        unreachable!();
     }
 }
 

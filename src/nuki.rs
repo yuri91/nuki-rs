@@ -7,7 +7,6 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use btleplug::api::Characteristic;
 use futures::stream::{Stream, StreamExt};
-use std::io::Write;
 use std::pin::Pin;
 use uuid::Uuid;
 use std::cell::RefCell;
@@ -24,6 +23,8 @@ const KEYTURNER_PAIRING_GDIO: Uuid = Uuid::from_bytes([
 const KEYTURNER_USDIO: Uuid = Uuid::from_bytes([
     0xa9,0x2e,0xe2,0x02,0x55,0x01,0x11,0xe4,0x91,0x6c,0x08,0x00,0x20,0x0c,0x9a,0x66,
 ]);
+
+const APP_ID: u32 = 0xc0febabeu32;
 
 struct NukiInner {
     p: Peripheral,
@@ -142,7 +143,7 @@ impl NukiUnpaired {
         let resp: message::Challenge = self.send(&req).await?;
 
         let id_type = 0u8;
-        let app_id = 0xc0febabeu32;
+        let app_id = APP_ID;
         let mut app_id_bytes = Vec::new();
         app_id_bytes.write_u32::<LittleEndian>(app_id).unwrap();
         let name = b"rustynuke";
@@ -200,18 +201,48 @@ impl Nuki {
         self.auth.clone()
     }
 
-    async fn send<REP: message::Message, REQ: message::Message>(&self, r: &REQ) -> Result<REP> {
-        let buf = message::encrypt(r, self.auth.auth_id, &self.shared_key);
-        self.inner.p.write(&self.inner.keyturner, &buf, WriteType::WithResponse).await?;
+    async fn receive<REP: message::Message>(&self) -> Result<REP> {
         let data = self.inner.wait_for_notification(&self.inner.keyturner).await?;
         let reply = message::decrypt(&data, &self.shared_key)?;
         Ok(reply)
     }
-    pub async fn read_keyturner_states(&self) -> Result<message::KeyturnerStates> {
+    async fn send<REP: message::Message, REQ: message::Message>(&self, r: &REQ) -> Result<REP> {
+        let buf = message::encrypt(r, self.auth.auth_id, &self.shared_key);
+        self.inner.p.write(&self.inner.keyturner, &buf, WriteType::WithResponse).await?;
+        self.receive().await
+    }
+    pub async fn read_keyturner_states(&mut self) -> Result<message::KeyturnerStates> {
         let req = message::RequestData::new(command::KEYTURNER_STATES);
         let resp: message::KeyturnerStates = self.send(&req).await?;
 
         Ok(resp)
+    }
+    pub async fn lock_action(&mut self, action: message::LockActionKind) -> Result<()> {
+        let req = message::RequestData::new(command::CHALLENGE);
+        let resp: message::Challenge = self.send(&req).await?;
+
+        let nonce = resp.nonce;
+        let req = message::LockAction::new(action, APP_ID, 0, None, &nonce);
+        let resp: message::Status = self.send(&req).await?;
+        if resp.status != message::StatusKind::Accepted {
+            anyhow::bail!("Unexpected return status: {:?}", resp.status);
+        }
+
+        let resp: message::KeyturnerStates = self.receive().await?;
+        if resp.lock_state != message::LockState::Unlocking {
+            anyhow::bail!("Unexpected lock state: {:?}", resp.lock_state);
+        }
+
+        let resp: message::KeyturnerStates = self.receive().await?;
+        if resp.lock_state != message::LockState::Unlocked {
+            anyhow::bail!("Unexpected lock state: {:?}", resp.lock_state);
+        }
+
+        let resp: message::Status = self.send(&req).await?;
+        if resp.status != message::StatusKind::Complete {
+            anyhow::bail!("Unexpected return status: {:?}", resp.status);
+        }
+        Ok(())
     }
 }
 

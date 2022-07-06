@@ -7,7 +7,7 @@ mod crypto;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
-    let nuki = if let Ok(auth) = std::fs::read_to_string("auth.json") {
+    let mut nuki = if let Ok(auth) = std::fs::read_to_string("auth.json") {
         println!("already authenticated");
         let auth = serde_json::from_str(&auth)?;
         nuki::Nuki::with_auth(auth).await?
@@ -21,5 +21,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let states = nuki.read_keyturner_states().await?;
     println!("{:?}", states);
+    nuki.lock_action(message::LockActionKind::Unlock).await?;
     Ok(())
 }
