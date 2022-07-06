@@ -1,7 +1,9 @@
 [package]
-name = "nuki"
+name = "nuki-smart-lock"
 version = "0.1.0"
 edition = "2021"
+description = "Control a Nuki Smart Lock with the Bluetooth API in Rust"
+license = "AGPL-3.0-only"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
